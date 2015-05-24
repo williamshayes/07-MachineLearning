@@ -1,0 +1,210 @@
+---
+title: "Machine Learning Course Project"
+author: "Hayes Williams"
+date: "Thursday, May 21, 2015"
+output: html_document
+---
+
+# Introduction
+
+Devices such as Jawbone Up, Nike FuelBand, and Fitbit alllow the collection of
+a large amount of data about personal activity relatively inexpensively. These 
+type of devices are part of the quantified self movement - a group of 
+enthusiasts who take measurements about themselves regularly to improve their 
+health, to find patterns in their behavior, or because they are tech geeks. 
+
+This paper describes the analysis of data from accelerometers on the belt, 
+forearm, arm, and dumbell of 6 participants who were asked to perform barbell 
+lifts correctly and incorrectly in 5 different ways as follows:
+
+* `A`: Exactly according to direction
+* `B`: Throwing elbows to the front
+* `C`: Lifting only halfway
+* `D`: Lowering only halfway
+* `E`: Throwing hips to the front
+
+These data were then used to train various algorithms in an effort to determine
+if a machine learning technique could accurately predict the type of activity
+performed based on the recorded data from the accelerometers attached to the 
+volunteers.
+
+## Source Data 
+
+The training data for this project are available here: [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). The test data are available [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+## Data Loading
+
+The data was loaded from the source URLs above.  During input, the following 
+items: NA, spaces ("") and #DIV/0! were marked as NA to indicate they were not
+recognized data.
+
+```{r, cache=TRUE}
+download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+              "pml-training.csv")
+download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+              "pml-testing.csv")
+
+pml_train <- read.csv("pml-training.csv", na.strings=c("NA","","#DIV/0!"))
+pml_test <- read.csv("pml-testing.csv", na.strings=c("NA","","#DIV/0!"))
+```
+
+## Data Cleansing
+### NA Columns Removed
+After load, the data was cleansed before analysis.  All columns were evaluated
+to determine what percentage NA's they contained.  Columns which were determined
+to have >95% NA's were removed from the analysis set in both the test and train
+data sets.  The specific steps were detailed in the comments below.
+```{r, cache=TRUE}
+library(dplyr)
+# Interpretation of dplyr chain notation:
+# na_cols_df <- Take the training data set and 
+#               Summarise each column by counting na's and dividing by length
+#               Transposing the wide column format with one row to narrow
+#               Cast as a data frame because it comes out as a matrix
+#               Move the rownames into an explicit column variable
+#               Subset only those with > 95% nulls
+#               Select only the rowname column
+na_cols_df <- pml_train %>% 
+              summarise_each(funs(count=sum(is.na(.))/length(.))) %>% 
+              t %>% 
+              as.data.frame %>% 
+              add_rownames %>% 
+              filter(V1>0.95) %>% 
+              select(rowname)
+na_col <- c(na_cols_df$rowname, "X") # Add the first column row name
+
+# Remove the columns identified in na_col from train and test subsets
+pml_train_subset <- select(pml_train, -one_of(na_col))
+pml_test_subset <- select(pml_test, -one_of(na_col))
+```
+
+### Near Zero Covariates Removed
+After the initial cleansing step of removing NAs, the caret library was loaded 
+and a check for near zero covariates was performed.
+The column `new_window` shows as a near zero covariate.  This column was 
+removed. A compound timestamp was added and other non-motion related variables 
+such as `raw_timestamp_part_1`, `raw_timestamp_part_2`, `cvtd_timestamp`,
+`new_window` and `num_window` were also removed from the test and train subsets.
+```{r, cache=TRUE}
+library(caret)
+
+nearZeroVar(pml_train_subset, saveMetrics=TRUE)
+
+drop_cols <- c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", 
+               "new_window", "num_window")
+
+pml_train_subset2 <- pml_train_subset %>% 
+                     mutate(timestamp=(raw_timestamp_part_1 + 
+                                       raw_timestamp_part_2/10^6)) %>%
+                     select(-one_of(drop_cols))
+
+pml_test_subset2 <- pml_test_subset %>%
+                         mutate(timestamp=(raw_timestamp_part_1 + 
+                                       raw_timestamp_part_2/10^6)) %>%
+                     select(-one_of(drop_cols))
+
+```
+
+
+# Analysis and model building.
+
+## Separation of Train Data Set
+The train data set was split into a train and test using a ratio of 0.7 of 
+train to test in the selection and assignments to each category.  Following this
+a set of models were built to determine the best predictive methodology. For
+the remainder of the model building activity the `training` set is used to build
+the model and the `testing` set is used by the `predict` function for cross
+validation of the results. The original test 
+
+```{r, cache=TRUE}
+set.seed(8888)
+pml_inTrain = createDataPartition(y=pml_train_subset2$classe, p=0.7, list=FALSE)
+training = pml_train_subset2[pml_inTrain,]
+testing = pml_train_subset2[-pml_inTrain,]
+dim(training)
+```
+
+## Classification Tree
+The classification Tree methodology was initially used to model the data as 
+shown below.
+```{r, cache=TRUE}
+library(rattle)
+class_tree_model_fit <- train(classe ~ ., data = training, method="rpart")
+print(class_tree_model_fit, digits=3)
+print(class_tree_model_fit$finalModel, digits=3)
+fancyRpartPlot(class_tree_model_fit$finalModel)
+```
+
+A tree model is shown which separates the prediction by contributing variable.
+
+```{r, cache=TRUE}
+class_tree_predictions <- predict(class_tree_model_fit, newdata=testing)
+print(confusionMatrix(class_tree_predictions, testing$classe), digits=4)
+```
+
+When applied against the data set `testing` which was the portion of the
+original training set left aside a relatively disappointing predicative 
+accuracy of 66% was identified as shown above and indicated by the confusion
+matrix.
+
+## Random Forest
+A Random Forest model was attempted next.  This model included a cross 
+validation structure of 4 parts.
+```{r, cache=TRUE}
+random_forest_model_fit <- train(training$classe ~ ., method="rf", 
+                                 trControl=trainControl(method = "cv", 
+                                                        number = 4),
+                                 prox=TRUE,
+                                 data=training)
+print(random_forest_model_fit, digits=3)
+predictions <- predict(random_forest_model_fit, newdata=testing)
+print(confusionMatrix(predictions, testing$classe), digits=4)
+```
+This model produced an excellent accuracy of about 99%.  Virtually the entire
+testing set was identified correctly.
+
+## Boosting
+Finally a boosting model was used as an alternative methodology.
+```{r, cache=TRUE}
+gbm_boosting_model_fit <- train(training$classe ~ ., method="gbm", 
+                                 verbose=FALSE, data=training)
+print(gbm_boosting_model_fit, digits=3)
+predictions <- predict(gbm_boosting_model_fit, newdata=testing)
+print(confusionMatrix(predictions, testing$classe), digits=4)
+```
+This also produced an excellent 99% accuracy level as indicated by the above
+confusion matrix and Accuracy rating.
+
+# Conclusions
+
+The random forest and boosting methods produced excellent predictive results for
+this problem data set.  Focusing on the Random Forest results for example, the 
+accuracy was essentially 99% on the `testing` data set held aside from the 
+model fitting excercise. 
+
+# Submission Answers for Automated Testing
+For the final predictive approach the random forest and boosting methodologies 
+were used to predict the automated submission test set.  Fortunatly both
+gave exactly the same answers for this test set so the fact that 
+`pml_write_files` is called twice and overwrites the submission files isn't a
+problem. The vector returned by `sapply` comes out as a factor variable so the
+`sapply` function is used to move each element to a character to heed the 
+warning in the submission instructions.
+```{r}
+pml_write_files <- function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+predictions_rf <- sapply(predict(random_forest_model_fit, 
+                                  pml_test_subset2, type = "raw"), as.character)
+pml_write_files(predictions_rf)
+
+predictions_boost <- sapply(predict(gbm_boosting_model_fit, 
+                                  pml_test_subset2, type = "raw"), as.character)
+pml_write_files(predictions_boost)
+
+```
